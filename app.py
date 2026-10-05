@@ -22,7 +22,7 @@ from typing import Dict, Optional
 
 from flask import Flask, jsonify, render_template, request, send_file
 
-from backend import analysis, audio_io, chords, effects, mixer, realtime, separation, storage
+from backend import analysis, audio_io, chords, effects, mixer, realtime, sampler, separation, storage
 
 try:
     from flask_cors import CORS
@@ -90,6 +90,7 @@ PAGES = {
     "pitch_beat": "音高与节拍",
     "chords": "和弦识别",
     "separation": "音源分离",
+    "sampler": "采样器",
     "effects": "效果链",
     "mixer": "混音台",
     "export": "导出与转换",
@@ -702,6 +703,81 @@ def api_realtime():
         return jsonify(error="empty buffer"), 400
     result = rt.process(samples, sr)
     return jsonify(result)
+
+
+# --------------------------------------------------------------------------- #
+# Sampler
+# --------------------------------------------------------------------------- #
+
+@app.post("/api/sampler/render")
+def api_sampler_render():
+    """Render a recorded sampler performance (note events) into a library WAV."""
+    data = request.get_json(force=True) or {}
+    file_id = data.get("file_id")
+    entry = _entry(file_id)
+    if not entry:
+        return jsonify(error="file not found"), 404
+    events = data.get("events", [])
+    if not isinstance(events, list) or not events:
+        return jsonify(error="没有演奏事件"), 400
+    cfg = data.get("config", {}) or {}
+    region = data.get("region", {}) or {}
+    try:
+        start = max(0.0, float(region.get("start", 0.0)))
+        end = float(region["end"]) if region.get("end") else None
+        sample = sampler.extract_sample(_abs_path(entry), start, end)
+    except (ValueError, RuntimeError) as e:
+        return jsonify(error=str(e)), 400
+
+    # Normalise events defensively.
+    clean_events = []
+    for ev in events:
+        try:
+            clean_events.append({
+                "midi": int(ev["midi"]),
+                "start": max(0.0, float(ev["start"])),
+                "duration": max(0.02, float(ev.get("duration", 1.0))),
+                "volume": min(2.0, max(0.0, float(ev.get("volume", 1.0)))),
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not clean_events:
+        return jsonify(error="演奏事件格式无效"), 400
+    # The renderer keeps the most recent MAX_VOICES concurrent notes; sorting
+    # makes voice stealing deterministic regardless of client event order.
+    clean_events.sort(key=lambda e: e["start"])
+
+    file_id_new = storage.new_id()
+    dst = os.path.join(store.audio_dir, file_id_new + ".wav")
+    try:
+        meta = sampler.render_performance(sample, clean_events, cfg, dst)
+    except (ValueError, RuntimeError) as e:
+        if os.path.exists(dst):
+            os.unlink(dst)
+        return jsonify(error=str(e)), 400
+
+    name = data.get("name") or f"sampler-{entry['name']}"
+    if not name.lower().endswith(".wav"):
+        name += ".wav"
+    new_entry = {
+        "id": file_id_new,
+        "name": name,
+        "path": f"audio/{file_id_new}.wav",
+        "sr": meta["sr"],
+        "channels": meta["channels"],
+        "frames": meta["frames"],
+        "duration": meta["duration"],
+        "size_bytes": os.path.getsize(dst),
+        "derived_from": entry["id"],
+        "sampler": {
+            "source_id": entry["id"],
+            "notes": meta["notes"],
+            "region": {"start": start, "end": end},
+            "config": cfg,
+        },
+    }
+    stored = store.add_file(new_entry)
+    return jsonify(stored)
 
 
 # --------------------------------------------------------------------------- #

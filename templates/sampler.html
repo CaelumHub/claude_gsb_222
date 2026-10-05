@@ -1,0 +1,555 @@
+{% extends "base.html" %}
+{% block title %}采样器{% endblock %}
+{% block content %}
+<div class="main-head">
+  <div>
+    <h1>采样器</h1>
+    <div class="sub">从音频库截取一段声音做成采样音色，映射到琴键/音阶上演奏并实时录制 · 单次/循环 · 变速或定长变调</div>
+  </div>
+  <div class="row">
+    <select id="fileSel" style="min-width:240px"></select>
+    <button class="btn-primary" id="loadFileBtn">加载声源</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row between mb">
+    <h2 style="margin:0">① 截取采样区域</h2>
+    <div class="row small muted">
+      <span id="regionLabel">未选择（在波形上拖拽）</span>
+    </div>
+  </div>
+  <div class="plot"><canvas id="wave" style="height:180px"></canvas></div>
+  <div class="row mt">
+    <button id="playRegionBtn" class="btn-sm">▶ 试听区域</button>
+    <button id="useAllBtn" class="btn-sm">整段作为采样</button>
+    <label class="field inline">起(s) <input type="number" id="regStart" min="0" step="0.01" style="width:80px"/></label>
+    <label class="field inline">止(s) <input type="number" id="regEnd" min="0" step="0.01" style="width:80px"/></label>
+    <span class="spacer"></span>
+    <button class="btn-green" id="buildBtn" disabled>② 生成采样音色</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>③ 音色参数</h2>
+  <div class="grid cols-4">
+    <label class="field">播放模式
+      <select id="modeSel">
+        <option value="varispeed">变调变速（时长随音高比例变化）</option>
+        <option value="fixed">变调定长（颗粒移调，时长不变）</option>
+      </select>
+    </label>
+    <label class="field">触发方式
+      <select id="loopSel">
+        <option value="oneshot">单次触发（One-shot）</option>
+        <option value="loop">循环（Loop）</option>
+      </select>
+    </label>
+    <label class="field">根音（原始音高对应键）
+      <select id="rootSel"></select>
+    </label>
+    <label class="field">音阶
+      <select id="scaleSel">
+        <option value="chromatic">半音阶（全部琴键）</option>
+        <option value="major">自然大调</option>
+        <option value="minor">自然小调</option>
+        <option value="pentatonic_major">大调五声音阶</option>
+        <option value="pentatonic_minor">小调五声音阶</option>
+        <option value="blues">布鲁斯音阶</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="grid cols-4 mt">
+    <label class="field">音域最低音
+      <select id="loSel"></select>
+    </label>
+    <label class="field">音域最高音
+      <select id="hiSel"></select>
+    </label>
+    <label class="field inline">主音量 <input type="range" id="masterRange" min="0" max="1.2" step="0.01" value="0.9" style="flex:1"/>
+      <span class="mono small" id="masterVal">0.90</span></label>
+    <label class="field inline">音色/低通(Hz) <input type="range" id="cutRange" min="0" max="12000" step="50" value="0" style="flex:1"/>
+      <span class="mono small" id="cutVal">直通</span></label>
+  </div>
+
+  <div class="grid cols-4 mt">
+    <label class="field inline">起音(s) <input type="range" id="attRange" min="0.001" max="1" step="0.001" value="0.005" style="flex:1"/>
+      <span class="mono small" id="attVal">0.005</span></label>
+    <label class="field inline">衰减(s) <input type="range" id="decRange" min="0" max="2" step="0.01" value="0" style="flex:1"/>
+      <span class="mono small" id="decVal">0.00</span></label>
+    <label class="field inline">持续 <input type="range" id="susRange" min="0" max="1" step="0.01" value="1" style="flex:1"/>
+      <span class="mono small" id="susVal">1.00</span></label>
+    <label class="field inline">释音(s) <input type="range" id="relRange" min="0.01" max="2" step="0.01" value="0.15" style="flex:1"/>
+      <span class="mono small" id="relVal">0.15</span></label>
+  </div>
+
+  <div class="row mt" id="loopRow" style="display:none">
+    <label class="field inline">循环起(s) <input type="number" id="loopStart" min="0" step="0.01" style="width:80px"/></label>
+    <label class="field inline">循环止(s) <input type="number" id="loopEnd" min="0" step="0.01" style="width:80px"/></label>
+    <button class="btn-sm" id="loopUseRegion">用采样区域首尾</button>
+    <label class="field inline">接缝交叉淡化(s) <input type="range" id="xfadeRange" min="0" max="0.2" step="0.005" value="0.02" style="width:160px"/>
+      <span class="mono small" id="xfadeVal">0.020</span></label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row between mb">
+    <h2 style="margin:0">④ 演奏键盘</h2>
+    <div class="row">
+      <span class="small muted">已选琴键音量</span>
+      <input type="range" id="keyVol" min="0" max="1.5" step="0.01" value="1" style="width:140px"/>
+      <span class="mono small" id="keyVolVal" style="min-width:42px">1.00</span>
+      <button class="btn-sm" id="resetVolBtn">重置所有键音量</button>
+      <span id="selectedKeyLabel" class="badge neutral">未选</span>
+    </div>
+  </div>
+  <div class="piano-scroll"><div class="piano" id="piano"></div></div>
+  <div class="row between mt small muted">
+    <span>鼠标按下琴键发声、松开停止；也可用电脑键盘：<span class="mono">Z S X D C V G B H N J M , L . ; /</span> 白/黑键从音域最低 C 排起</span>
+    <span id="voiceInfo"></span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row between mb">
+    <h2 style="margin:0">⑤ 录制演奏并存入音频库</h2>
+    <div class="row">
+      <span id="recTime" class="mono muted">0:00.0</span>
+      <button class="btn-danger" id="recBtn" disabled>● 开始录音</button>
+      <button class="btn-green hidden" id="stopBtn">■ 停止并生成音频</button>
+      <button id="allOffBtn" class="btn-sm">全部止音</button>
+    </div>
+  </div>
+  <div class="row">
+    <label class="field inline">新音频名称 <input type="text" id="recName" placeholder="sampler-演奏.wav" style="min-width:260px"/></label>
+    <span id="recStatus" class="small muted"></span>
+  </div>
+  <div class="row mt hidden" id="resultRow">
+    <button class="btn-green" id="openResultBtn">▶ 试听结果 / 去波形编辑</button>
+    <span id="resultInfo" class="muted small"></span>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/sampler-engine.js"></script>
+<script>
+/* ============================================================ page state */
+
+const engine = new SamplerEngine();
+let env = null;                 // waveform envelope of loaded source
+let sourceId = null;
+let sourceDuration = 0;
+let selStart = null, selEnd = null, dragging = false;
+let selectedMidi = null;        // key picked for per-key volume editing
+let built = false;              // sample currently loaded into the engine
+const regionAudio = new Audio();
+let recTimer = null;
+
+/* ============================================================ file list */
+
+async function loadFiles(selected) {
+  const files = await API.get("/api/library");
+  const sel = $("#fileSel");
+  sel.innerHTML = files.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join("");
+  if (selected) sel.value = selected;
+}
+
+/* ============================================================ note selects */
+
+function fillNoteSelect(sel, def) {
+  let html = "";
+  for (let m = 24; m <= 96; m++) {
+    html += `<option value="${m}" ${m === def ? "selected" : ""}>${midiName(m)} (${m})</option>`;
+  }
+  sel.innerHTML = html;
+}
+fillNoteSelect($("#rootSel"), 60);
+fillNoteSelect($("#loSel"), 48);
+fillNoteSelect($("#hiSel"), 72);
+
+/* ============================================================ waveform */
+
+async function loadSource() {
+  sourceId = $("#fileSel").value;
+  if (!sourceId) return;
+  built = false;
+  $("#buildBtn").disabled = true;
+  env = await API.get(`/api/audio/${sourceId}/waveform?points=3000`);
+  sourceDuration = env.duration;
+  selStart = selEnd = null;
+  $("#regStart").value = "";
+  $("#regEnd").value = "";
+  $("#regionLabel").textContent = "未选择（在波形上拖拽）";
+  $("#recStatus").textContent = "";
+  drawWave();
+}
+
+function drawWave() {
+  drawWaveform($("#wave"), env, {
+    selection: (selStart != null && selEnd != null)
+      ? [Math.min(selStart, selEnd), Math.max(selStart, selEnd)] : null,
+  });
+}
+
+const waveEl = $("#wave");
+waveEl.addEventListener("mousedown", (e) => {
+  if (!env) return;
+  const r = waveEl.getBoundingClientRect();
+  dragging = true;
+  selStart = selEnd = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  syncRegionInputs(); drawWave();
+});
+window.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  const r = waveEl.getBoundingClientRect();
+  selEnd = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  syncRegionInputs(); drawWave();
+});
+window.addEventListener("mouseup", () => { dragging = false; });
+
+function regionSeconds() {
+  if (selStart == null || Math.abs(selEnd - selStart) < 0.001) return null;
+  return [Math.min(selStart, selEnd) * sourceDuration,
+          Math.max(selStart, selEnd) * sourceDuration];
+}
+
+function syncRegionInputs() {
+  const rg = regionSeconds();
+  if (!rg) { $("#regionLabel").textContent = "未选择（在波形上拖拽）"; return; }
+  $("#regStart").value = rg[0].toFixed(3);
+  $("#regEnd").value = rg[1].toFixed(3);
+  $("#regionLabel").textContent = `${rg[0].toFixed(3)}s – ${rg[1].toFixed(3)}s（${(rg[1] - rg[0]).toFixed(3)}s）`;
+  $("#buildBtn").disabled = false;
+}
+
+$("#regStart").addEventListener("change", regionFromInputs);
+$("#regEnd").addEventListener("change", regionFromInputs);
+function regionFromInputs() {
+  const a = parseFloat($("#regStart").value), b = parseFloat($("#regEnd").value);
+  if (!isNaN(a) && !isNaN(b) && b > a && sourceDuration) {
+    selStart = a / sourceDuration; selEnd = b / sourceDuration;
+    $("#buildBtn").disabled = false;
+    drawWave();
+  }
+}
+
+$("#useAllBtn").onclick = () => {
+  if (!sourceDuration) return;
+  selStart = 0; selEnd = 1;
+  syncRegionInputs(); drawWave();
+};
+
+$("#playRegionBtn").onclick = () => {
+  const rg = regionSeconds();
+  if (!rg) return toast("请先选择采样区域", "warn");
+  regionAudio.src = API.fileUrl(sourceId);
+  regionAudio.onloadedmetadata = () => {
+    regionAudio.currentTime = rg[0];
+    regionAudio.play();
+  };
+  regionAudio.ontimeupdate = () => { if (regionAudio.currentTime >= rg[1]) regionAudio.pause(); };
+};
+
+/* ============================================================ build sample */
+
+async function buildSample() {
+  const rg = regionSeconds();
+  if (!rg) return toast("请先在波形上选择采样区域", "warn");
+  if (engine.recording) {
+    clearInterval(recTimer);
+    engine.stopRecording();
+    $("#stopBtn").classList.add("hidden");
+    $("#recBtn").classList.remove("hidden");
+    $("#recStatus").textContent = "重新生成采样已结束上一段录音";
+  }
+  $("#buildBtn").disabled = true;
+  try {
+    const info = await engine.loadSample(sourceId, rg[0], rg[1]);
+    built = true;
+    engine.region = rg;
+    applyAllParams();
+    // Default loop points to the region bounds (relative seconds).
+    const len = rg[1] - rg[0];
+    $("#loopStart").value = "0";
+    $("#loopEnd").value = len.toFixed(3);
+    engine.cfg.loopStart = 0;
+    engine.cfg.loopEnd = len;
+    engine.updateLoop();
+    toast(`采样音色已生成（${info.duration.toFixed(2)}s, ${info.sr} Hz）`, "success");
+    $("#recBtn").disabled = false;
+  } catch (err) {
+    toast("生成采样失败: " + err.message, "error");
+  } finally {
+    $("#buildBtn").disabled = false;
+  }
+}
+$("#loadFileBtn").onclick = loadSource;
+$("#buildBtn").onclick = buildSample;
+
+/* ============================================================ params */
+
+function bindRange(id, valId, key, fmt, post) {
+  const el = $(id), out = $(valId);
+  el.addEventListener("input", () => {
+    const v = parseFloat(el.value);
+    out.textContent = fmt(v);
+    engine.cfg[key] = v;
+    engine.updateParams();
+    if (post) post(v);
+  });
+}
+bindRange("#masterRange", "#masterVal", "master", v => v.toFixed(2));
+bindRange("#cutRange", "#cutVal", "cutoff", v => v <= 0 ? "直通" : v.toFixed(0) + " Hz");
+bindRange("#attRange", "#attVal", "attack", v => v.toFixed(3));
+bindRange("#decRange", "#decVal", "decay", v => v.toFixed(2));
+bindRange("#susRange", "#susVal", "sustain", v => v.toFixed(2));
+bindRange("#relRange", "#relVal", "release", v => v.toFixed(2));
+
+$("#modeSel").addEventListener("change", () => {
+  engine.cfg.mode = $("#modeSel").value; engine.updateParams(); engine.updateLoop();
+});
+$("#loopSel").addEventListener("change", () => {
+  const on = $("#loopSel").value === "loop";
+  engine.cfg.loopOn = on;
+  $("#loopRow").style.display = on ? "flex" : "none";
+  engine.updateLoop();
+});
+$("#xfadeRange").addEventListener("input", () => {
+  const v = parseFloat($("#xfadeRange").value);
+  $("#xfadeVal").textContent = v.toFixed(3);
+  engine.cfg.loopXfade = v; engine.updateLoop();
+});
+$("#loopStart").addEventListener("change", () => {
+  engine.cfg.loopStart = parseFloat($("#loopStart").value) || 0; engine.updateLoop();
+});
+$("#loopEnd").addEventListener("change", () => {
+  engine.cfg.loopEnd = parseFloat($("#loopEnd").value) || 0; engine.updateLoop();
+});
+$("#loopUseRegion").onclick = () => {
+  const len = engine.region ? engine.region[1] - engine.region[0] : 0;
+  $("#loopStart").value = "0"; $("#loopEnd").value = len.toFixed(3);
+  engine.cfg.loopStart = 0; engine.cfg.loopEnd = len; engine.updateLoop();
+};
+$("#rootSel").addEventListener("change", () => { engine.cfg.rootMidi = parseInt($("#rootSel").value); });
+
+function applyAllParams() {
+  Object.assign(engine.cfg, {
+    mode: $("#modeSel").value,
+    loopOn: $("#loopSel").value === "loop",
+    rootMidi: parseInt($("#rootSel").value),
+    master: parseFloat($("#masterRange").value),
+    cutoff: parseFloat($("#cutRange").value),
+    attack: parseFloat($("#attRange").value),
+    decay: parseFloat($("#decRange").value),
+    sustain: parseFloat($("#susRange").value),
+    release: parseFloat($("#relRange").value),
+    loopXfade: parseFloat($("#xfadeRange").value),
+  });
+  engine.updateParams();
+  engine.updateLoop();
+}
+
+/* ============================================================ piano */
+
+function isBlack(m) { return [1, 3, 6, 8, 10].includes(m % 12); }
+
+function noteAllowed(m) {
+  const scale = SCALES[$("#scaleSel").value] || SCALES.chromatic;
+  return scale.includes(((m % 12) + 12) % 12);
+}
+
+function renderPiano() {
+  let lo = parseInt($("#loSel").value), hi = parseInt($("#hiSel").value);
+  if (lo > hi) { [lo, hi] = [hi, lo]; }
+  const p = $("#piano");
+  p.innerHTML = "";
+  const whites = [];
+  for (let m = lo; m <= hi; m++) if (!isBlack(m)) whites.push(m);
+  const w = 46;
+  p.style.width = (whites.length * w) + "px";
+
+  const whiteIdx = new Map();
+  whites.forEach((m, i) => whiteIdx.set(m, i));
+  for (const m of whites) {
+    p.appendChild(makeKey(m, false, whiteIdx.get(m) * w, w));
+  }
+  // Black keys: positioned over the boundary after the white below.
+  for (let m = lo; m <= hi; m++) {
+    if (!isBlack(m)) continue;
+    let below = m - 1;
+    while (isBlack(below)) below--;
+    if (!whiteIdx.has(below)) continue;
+    p.appendChild(makeKey(m, true, (whiteIdx.get(below) + 1) * w - w * 0.3, w * 0.6));
+  }
+}
+
+function makeKey(m, black, x, w) {
+  const el = document.createElement("div");
+  el.className = "key " + (black ? "black" : "white");
+  el.dataset.midi = m;
+  el.style.left = x + "px";
+  el.style.width = w + "px";
+  if (!noteAllowed(m)) el.classList.add("dim");
+  const lab = document.createElement("span");
+  lab.className = "klabel";
+  lab.textContent = midiName(m);
+  el.appendChild(lab);
+
+  const v = engine.volumes.has(m) ? engine.volumes.get(m) : 1;
+  if (black) el.style.filter = `brightness(${0.25 + 0.75 * v / 1.5})`;
+  else el.style.background = `rgba(88,166,255,${0.04 + 0.22 * (v / 1.5)})`;
+  if (selectedMidi === m) el.classList.add("selected");
+
+  el.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    selectKey(m);
+    if (!el.classList.contains("dim")) engine.noteOn(m);
+    el.classList.add("down");
+  });
+  const up = () => {
+    engine.noteOff(m);
+    el.classList.remove("down");
+  };
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointercancel", up);
+  el.addEventListener("pointerleave", (e) => {
+    if (e.buttons) { engine.noteOff(m); el.classList.remove("down"); }
+  });
+  return el;
+}
+
+function selectKey(m) {
+  selectedMidi = m;
+  $("#selectedKeyLabel").textContent = midiName(m);
+  const v = engine.volumes.has(m) ? engine.volumes.get(m) : 1;
+  $("#keyVol").value = v;
+  $("#keyVolVal").textContent = Number(v).toFixed(2);
+  renderPiano();
+}
+
+$("#keyVol").addEventListener("input", () => {
+  if (selectedMidi == null) return toast("请先点击一个琴键", "warn");
+  const v = parseFloat($("#keyVol").value);
+  $("#keyVolVal").textContent = v.toFixed(2);
+  engine.volumes.set(selectedMidi, v);
+  renderPiano();
+});
+$("#resetVolBtn").onclick = () => {
+  engine.volumes.clear();
+  if (selectedMidi != null) { $("#keyVol").value = 1; $("#keyVolVal").textContent = "1.00"; }
+  renderPiano();
+  toast("已重置所有琴键音量", "info");
+};
+$("#loSel").addEventListener("change", renderPiano);
+$("#hiSel").addEventListener("change", renderPiano);
+$("#scaleSel").addEventListener("change", renderPiano);
+$("#allOffBtn").onclick = () => engine.allNotesOff();
+
+/* ============================================================ computer keys */
+
+const BOTTOM = ["z","s","x","d","c","v","g","b","h","n","j","m",",","l",".",";","/","'"];
+const TOP = ["q","2","w","3","e","r","5","t","6","y","7","u","i","9","o","0","p","[","=","]"];
+const keyMap = new Map();
+
+function rebuildKeyMap() {
+  keyMap.clear();
+  const lo = parseInt($("#loSel").value);
+  // Anchor the bottom row on the lowest C at/below the range bottom.
+  let anchor = lo - ((lo % 12) + 12) % 12;
+  BOTTOM.forEach((k, i) => keyMap.set(k, anchor + i));
+  TOP.forEach((k, i) => keyMap.set(k, anchor + 12 + i));
+}
+$("#loSel").addEventListener("change", rebuildKeyMap);
+
+window.addEventListener("keydown", (e) => {
+  if (e.repeat || /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  const m = keyMap.get(e.key.toLowerCase());
+  if (m == null || m < parseInt($("#loSel").value) || m > parseInt($("#hiSel").value)) return;
+  if (!noteAllowed(m)) return;
+  engine.noteOn(m);
+  const el = document.querySelector(`.key[data-midi="${m}"]`);
+  if (el) el.classList.add("down");
+});
+window.addEventListener("keyup", (e) => {
+  const m = keyMap.get(e.key.toLowerCase());
+  if (m == null) return;
+  engine.noteOff(m);
+  const el = document.querySelector(`.key[data-midi="${m}"]`);
+  if (el) el.classList.remove("down");
+});
+
+/* ============================================================ recording */
+
+$("#recBtn").onclick = () => {
+  if (!built) return toast("请先生成采样音色", "warn");
+  engine.startRecording();
+  $("#recBtn").classList.add("hidden");
+  $("#stopBtn").classList.remove("hidden");
+  $("#recStatus").textContent = "● 录音中… 现在演奏键盘";
+  const t0 = performance.now();
+  recTimer = setInterval(() => {
+    $("#recTime").textContent = ((performance.now() - t0) / 1000).toFixed(1) + "s";
+  }, 100);
+};
+
+$("#stopBtn").onclick = async () => {
+  clearInterval(recTimer);
+  const events = engine.stopRecording();
+  $("#stopBtn").classList.add("hidden");
+  $("#recBtn").classList.remove("hidden");
+  if (!events.length) {
+    $("#recStatus").textContent = "没有录制到音符";
+    return;
+  }
+  $("#recStatus").textContent = `正在后端渲染 ${events.length} 个音符…`;
+  const cfg = {
+    root_midi: engine.cfg.rootMidi,
+    mode: engine.cfg.mode,
+    loop: engine.cfg.loopOn,
+    loop_start: engine.cfg.loopStart,
+    loop_end: engine.cfg.loopEnd,
+    loop_xfade: engine.cfg.loopXfade,
+    attack: engine.cfg.attack, decay: engine.cfg.decay,
+    sustain: engine.cfg.sustain, release: engine.cfg.release,
+    cutoff: engine.cfg.cutoff, master: engine.cfg.master,
+  };
+  try {
+    const entry = await API.post("/api/sampler/render", {
+      file_id: sourceId,
+      region: { start: engine.region[0], end: engine.region[1] },
+      config: cfg,
+      events,
+      name: $("#recName").value.trim(),
+    });
+    lastResult = entry;
+    $("#recStatus").textContent = "";
+    $("#resultRow").classList.remove("hidden");
+    $("#resultInfo").textContent =
+      `${esc(entry.name)} · ${entry.duration.toFixed(2)}s · ${events.length} 音符 · 已存入音频库（可继续编辑）`;
+    toast("演奏已保存进音频库", "success");
+    loadFiles(entry.id);
+  } catch (err) {
+    $("#recStatus").textContent = "渲染失败: " + err.message;
+    toast(err.message, "error");
+  }
+};
+
+let lastResult = null;
+$("#openResultBtn").onclick = () => {
+  if (lastResult) location.href = `/waveform?file=${lastResult.id}`;
+};
+
+/* ============================================================ init */
+
+(async () => {
+  renderPiano();
+  rebuildKeyMap();
+  const preset = new URLSearchParams(location.search).get("file");
+  await loadFiles(preset);
+  if (preset) await loadSource();
+})();
+</script>
+{% endblock %}

@@ -100,6 +100,7 @@ function srcBadge(f) {
   if (f.separation) return `<span class="badge purple">分离</span>`;
   if (f.project_id) return `<span class="badge green">混音</span>`;
   if (f.effects) return `<span class="badge purple">效果</span>`;
+  if (f.sampler) return `<span class="badge green">采样演奏</span>`;
   if (f.derived_from) return `<span class="badge">编辑</span>`;
   if (f.original_format === "generated") return `<span class="badge neutral">生成</span>`;
   return `<span class="badge neutral">${esc((f.original_format || "wav").toUpperCase())}</span>`;
@@ -122,6 +123,7 @@ async function load() {
       <td class="row">
         <button class="btn-sm" onclick="playFile('${f.id}','${esc(f.name)}')">▶ 播放</button>
         <button class="btn-sm" onclick="location.href='/waveform?file=${f.id}'">编辑</button>
+        <button class="btn-sm" onclick="location.href='/sampler?file=${f.id}'">采样器</button>
         <button class="btn-sm" onclick="location.href='/spectrogram?file=${f.id}'">频谱</button>
         <a class="btn btn-sm" href="${API.downloadUrl(f.id)}">下载</a>
         <button class="btn-sm btn-danger" onclick="del('${f.id}')">删除</button>
