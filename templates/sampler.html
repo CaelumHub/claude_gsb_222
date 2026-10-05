@@ -1,0 +1,552 @@
+{% extends "base.html" %}
+{% block title %}采样器{% endblock %}
+{% block content %}
+<div class="main-head">
+  <div>
+    <h1>采样器</h1>
+    <div class="sub">把音频库里的声音截取成采样音色，映射到琴键 / 音阶 · 变调（保时长）或磁带变速 · 单次 / 循环触发 · 实时演奏并录音入库</div>
+  </div>
+  <div class="row">
+    <select id="fileSel" style="min-width:220px"></select>
+    <button class="btn-primary" id="loadBtn">加载为采样</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row between mb">
+    <h2 style="margin:0">采样区间</h2>
+    <div class="row small muted">
+      <span id="srcInfo">未加载</span>
+      <span class="spacer"></span>
+      <label class="field inline"><input type="radio" name="drag" value="region" checked/> 拖选采样区间</label>
+      <label class="field inline"><input type="radio" name="drag" value="loop"/> 拖选循环段</label>
+    </div>
+  </div>
+  <div class="plot"><canvas id="wave" style="height:180px"></canvas></div>
+  <div class="row mt" style="gap:16px">
+    <label class="field inline">起点(s) <input type="number" id="regStart" value="0" min="0" step="0.01" style="width:84px"/></label>
+    <label class="field inline">终点(s) <input type="number" id="regEnd" value="1" min="0" step="0.01" style="width:84px"/></label>
+    <label class="field inline">循环起(s) <input type="number" id="loopStart" value="0" min="0" step="0.01" style="width:84px"/></label>
+    <label class="field inline">循环止(s) <input type="number" id="loopEnd" value="1" min="0" step="0.01" style="width:84px"/></label>
+    <button id="regionAll" class="btn-sm">整段</button>
+    <button id="applyRegion" class="btn-sm btn-green">应用区间</button>
+    <span class="faint small">蓝色 = 采样区间，绿色 = 循环段（循环触发时生效）</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>音色与映射</h2>
+  <div class="row" style="gap:18px">
+    <label class="field inline">触发
+      <select id="trigger">
+        <option value="oneshot">单次触发（响完为止）</option>
+        <option value="loop">循环（按住持续）</option>
+      </select>
+    </label>
+    <label class="field inline">变调方式
+      <select id="mode">
+        <option value="pitch">变调保持时长（粒度合成）</option>
+        <option value="tape">磁带变速（音高随时长比例变化）</option>
+      </select>
+    </label>
+    <label class="field inline">根音（源音高）
+      <select id="root"></select>
+    </label>
+    <label class="field inline">音阶
+      <select id="scale"></select>
+    </label>
+    <label class="field inline">音域起 <select id="loNote" style="width:84px"></select></label>
+    <label class="field inline">止 <select id="hiNote" style="width:84px"></select></label>
+    <label class="field inline">力度 <input type="range" id="vel" min="0.1" max="1" step="0.01" value="0.9" style="width:110px"/><span id="velVal" class="mono small">0.90</span></label>
+    <label class="field inline">主音量 <input type="range" id="masterVol" min="0" max="1.4" step="0.01" value="0.9" style="width:110px"/></label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row between mb">
+    <h2 style="margin:0">演奏</h2>
+    <span class="faint small">鼠标 / 触摸点按琴键，或电脑键盘：ZXCVBNM,./ 与 QWERTYUIOP 两排</span>
+  </div>
+  <div class="piano-wrap"><div class="piano" id="piano"></div></div>
+  <div class="row between mt">
+    <div class="row">
+      <button id="panicBtn" class="btn-sm btn-danger">全部止音</button>
+      <span id="voiceInfo" class="muted small mono"></span>
+    </div>
+    <div class="row">
+      <div id="recDot" class="rec-dot hidden"></div>
+      <button id="recBtn" class="btn-green">● 开始录音</button>
+      <button id="renderBtn" class="btn-primary">按演奏事件离线精渲染</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row between mb">
+    <h2 style="margin:0">每键音量</h2>
+    <span class="faint small">纵向推子，0–200%；只列出当前音域内音阶上的键</span>
+  </div>
+  <div class="kevgain-wrap" id="keyGains"></div>
+</div>
+
+<div class="card hidden" id="recCard">
+  <h2>录音结果</h2>
+  <div id="recResult" class="row"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/sampler.js"></script>
+<script>
+/* ============================================================ page state */
+
+const engine = new SamplerEngine();
+let library = [], env = null, currentFile = null;
+let selDrag = { kind: "region", a: null, b: null };
+let recorder = null;
+let recordEvents = [];
+let recording = false;
+
+/* =============================================================== helpers */
+
+function config() {
+  return {
+    trigger: $("#trigger").value,
+    mode: $("#mode").value,
+    root: +$("#root").value,
+    region_start: +$("#regStart").value,
+    region_end: +$("#regEnd").value,
+    loop_start: +$("#loopStart").value,
+    loop_end: +$("#loopEnd").value,
+  };
+}
+
+function enabledNotes() {
+  const lo = +$("#loNote").value, hi = +$("#hiNote").value;
+  const offsets = SCALES[$("#scale").value].offsets;
+  const rootPc = +$("#root").value % 12;
+  const notes = [];
+  for (let m = lo; m <= hi; m++) {
+    const rel = ((m - rootPc) % 12 + 12) % 12;
+    if (offsets.includes(rel)) notes.push(m);
+  }
+  return notes;
+}
+
+function pushConfig() {
+  if (!engine.region) return;
+  engine.velocity = +$("#vel").value;
+  engine.master.gain.value = +$("#masterVol").value;
+  engine.configure({
+    mode: $("#mode").value,
+    trigger: $("#trigger").value,
+    root: +$("#root").value,
+    loopStart: +$("#loopStart").value - +$("#regStart").value,
+    loopEnd: +$("#loopEnd").value - +$("#regStart").value,
+  });
+}
+
+/* ================================================================ loading */
+
+async function loadFiles(selected) {
+  library = await API.get("/api/library");
+  const sel = $("#fileSel");
+  sel.innerHTML = library.map((f) => `<option value="${f.id}">${esc(f.name)}</option>`).join("");
+  if (selected) sel.value = selected;
+}
+
+async function loadAsSampler() {
+  const id = $("#fileSel").value;
+  if (!id) return toast("请先选择音频库文件", "warn");
+  currentFile = library.find((f) => f.id === id);
+  try {
+    env = await API.get(`/api/audio/${id}/waveform?points=3000`);
+  } catch (e) { return toast(e.message, "error"); }
+  // Sensible defaults: whole file, inner 60% as loop.
+  $("#regStart").value = 0;
+  $("#regEnd").value = (+env.duration.toFixed(3));
+  $("#loopStart").value = (+(env.duration * 0.2).toFixed(3));
+  $("#loopEnd").value = (+(env.duration * 0.8).toFixed(3));
+  $("#srcInfo").textContent = `${esc(currentFile.name)} · ${env.duration.toFixed(2)}s · ${env.sr}Hz`;
+  await engine.loadFile(id, 0, env.duration);
+  applyRegion();
+  drawWave();
+  toast("已加载为采样音色，直接点琴键演奏", "success");
+}
+
+function applyRegion() {
+  if (!env) return;
+  const rs = clampNum($("#regStart"), 0, env.duration);
+  const re = clampNum($("#regEnd"), 0, env.duration);
+  let ls = clampNum($("#loopStart"), rs, re);
+  let le = clampNum($("#loopEnd"), ls, re);
+  if (re <= rs) return toast("采样区间终点必须晚于起点", "warn");
+  engine.setRegion(rs, re);
+  engine.regionStartAbs = rs;
+  engine.configure({
+    mode: $("#mode").value,
+    trigger: $("#trigger").value,
+    root: +$("#root").value,
+    loopStart: Math.max(0, ls - rs),
+    loopEnd: Math.min(re - rs, le - rs),
+  });
+}
+
+function clampNum(inp, lo, hi) {
+  let v = parseFloat(inp.value);
+  if (isNaN(v)) v = lo;
+  v = Math.max(lo, Math.min(hi, v));
+  inp.value = +v.toFixed(3);
+  return v;
+}
+
+/* ================================================================ waveform */
+
+const wave = $("#wave");
+function drawWave() {
+  const rs = +$("#regStart").value, re = +$("#regEnd").value;
+  const ls = +$("#loopStart").value, le = +$("#loopEnd").value;
+  const D = env.duration;
+  // Base waveform (centre line + envelope) from the shared renderer, then
+  // paint the region/loop overlays ourselves.
+  const { ctx, w, h } = setupCanvas(wave);
+  ctx.clearRect(0, 0, w, h);
+  const mins = env.mins || [], maxs = env.maxs || [];
+  const mid = h / 2, step = w / mins.length;
+  ctx.strokeStyle = (getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#58a6ff");
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < mins.length; i++) {
+    const x = i * step;
+    ctx.moveTo(x, mid - (maxs[i] || 0) * mid * 0.95);
+    ctx.lineTo(x, mid - (mins[i] || 0) * mid * 0.95);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(139,148,158,0.35)";
+  ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+
+  // Region (blue)
+  const rx = (rs / D) * w, rw = ((re - rs) / D) * w;
+  ctx.fillStyle = "rgba(88,166,255,0.12)";
+  ctx.fillRect(rx, 0, rw, h);
+  ctx.strokeStyle = "rgba(88,166,255,0.9)";
+  ctx.beginPath();
+  ctx.moveTo(rx, 0); ctx.lineTo(rx, h);
+  ctx.moveTo(rx + rw, 0); ctx.lineTo(rx + rw, h);
+  ctx.stroke();
+
+  // Loop segment (green)
+  ctx.fillStyle = "rgba(63,185,80,0.15)";
+  ctx.fillRect((ls / D) * w, 0, ((le - ls) / D) * w, h);
+  ctx.strokeStyle = "rgba(63,185,80,0.95)";
+  ctx.beginPath();
+  ctx.moveTo((ls / D) * w, 0); ctx.lineTo((ls / D) * w, h);
+  ctx.moveTo((le / D) * w, 0); ctx.lineTo((le / D) * w, h);
+  ctx.stroke();
+}
+
+wave.addEventListener("mousedown", (e) => {
+  if (!env) return;
+  const r = wave.getBoundingClientRect();
+  selDrag.kind = document.querySelector('input[name="drag"]:checked').value;
+  selDrag.a = (e.clientX - r.left) / r.width;
+  selDrag.b = selDrag.a;
+});
+window.addEventListener("mousemove", (e) => {
+  if (selDrag.a == null || !env) return;
+  const r = wave.getBoundingClientRect();
+  selDrag.b = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const [a, b] = [Math.min(selDrag.a, selDrag.b), Math.max(selDrag.a, selDrag.b)].map((x) => +(x * env.duration).toFixed(3));
+  if (selDrag.kind === "region") { $("#regStart").value = a; $("#regEnd").value = b; }
+  else { $("#loopStart").value = a; $("#loopEnd").value = b; }
+  drawWave();
+});
+window.addEventListener("mouseup", () => {
+  if (selDrag.a == null) return;
+  selDrag.a = selDrag.b = null;
+  applyRegion();
+});
+
+/* =============================================================== keyboard */
+
+function renderPiano() {
+  const piano = $("#piano");
+  const lo = +$("#loNote").value, hi = +$("#hiNote").value;
+  const enabled = new Set(enabledNotes());
+  const whites = [];
+  for (let m = lo; m <= hi; m++) if (!NOTE_NAMES[m % 12].includes("#")) whites.push(m);
+
+  const whiteW = 42, whiteH = 150;
+  const width = whites.length * whiteW;
+  piano.style.width = width + "px";
+  const keyMap = buildKeyMap(whites);
+
+  let html = "";
+  whites.forEach((m, i) => {
+    const on = enabled.has(m);
+    html += `<div class="key white ${on ? "" : "off"}" data-midi="${m}" style="left:${i * whiteW}px;width:${whiteW - 2}px">
+      <span class="kn">${midiToName(m)}</span><span class="kk">${keyMap[m] || ""}</span></div>`;
+  });
+  // black keys positioned over white gaps
+  whites.forEach((m, i) => {
+    const sharp = m + 1;
+    if (sharp > hi || !NOTE_NAMES[sharp % 12].includes("#")) return;
+    const on = enabled.has(sharp);
+    html += `<div class="key black ${on ? "" : "off"}" data-midi="${sharp}" style="left:${(i + 1) * whiteW - 11}px">
+      <span class="kk">${keyMap[sharp] || ""}</span></div>`;
+  });
+  piano.innerHTML = html;
+
+  $$(".key", piano).forEach((el) => {
+    const midi = +el.dataset.midi;
+    el.addEventListener("mousedown", (ev) => { ev.preventDefault(); mouseHeld.add(midi); press(midi, el); });
+    el.addEventListener("mouseenter", (ev) => { if (ev.buttons & 1) { mouseHeld.add(midi); press(midi, el); } });
+    el.addEventListener("mouseup", (ev) => { ev.preventDefault(); mouseHeld.delete(midi); release(midi, el); });
+    el.addEventListener("mouseleave", () => { if (mouseHeld.has(midi)) { mouseHeld.delete(midi); release(midi, el); } });
+    el.addEventListener("touchstart", (ev) => { ev.preventDefault(); press(midi, el); }, { passive: false });
+    el.addEventListener("touchend", (ev) => { ev.preventDefault(); release(midi, el); }, { passive: false });
+    el.addEventListener("touchcancel", (ev) => { ev.preventDefault(); release(midi, el); }, { passive: false });
+  });
+  renderKeyGains();
+}
+
+function buildKeyMap(whites) {
+  // Map the two computer rows onto consecutive enabled white positions;
+  // sharps come from KEY_ROW_SHARP of the underlying white.
+  const map = {};
+  const flat = [].concat(...KEY_ROWS);
+  // First 10 white keys -> bottom row, next 10 -> a row, next -> q row.
+  whites.forEach((m, i) => { const ch = flat[i]; if (ch) map[m] = ch; });
+  whites.forEach((m) => {
+    const ch = map[m];
+    if (!ch) return;
+    const sh = KEY_ROW_SHARP[ch];
+    if (sh && !Object.values(map).includes(sh)) map[m + 1] = sh;
+  });
+  // Invert for keydown lookup.
+  const inv = {};
+  Object.entries(map).forEach(([midi, ch]) => { inv[ch] = +midi; });
+  engine._keyInv = inv;
+  return map;
+}
+
+function press(midi, el) {
+  if (!engine.region) return toast("请先加载采样音色", "warn");
+  pushConfig();
+  const vel = +$("#vel").value;
+  engine.noteOn(midi, vel);
+  if (el) el.classList.add("active");
+  if (recording) recordEvents.push({ midi, t: engine.now() - recT0, kind: "on", velocity: vel });
+}
+
+function release(midi, el) {
+  if (!engine.region) return;
+  engine.noteOff(midi);
+  if (el) el.classList.remove("active");
+  if (recording) recordEvents.push({ midi, t: engine.now() - recT0, kind: "off" });
+}
+
+const mouseHeld = new Set();
+
+engine.onVoicesChange = (set) => {
+  $("#voiceInfo").textContent = set.size ? `发声键: ${[...set].map(midiToName).join(" ")}` : "";
+};
+
+/* computer keyboard */
+const held = new Set();
+window.addEventListener("keydown", (e) => {
+  if (e.repeat || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  const midi = engine._keyInv && engine._keyInv[e.key.toLowerCase()];
+  if (midi == null) return;
+  if (held.has(midi)) return;
+  held.add(midi);
+  press(midi, $(`.key[data-midi="${midi}"]`));
+});
+window.addEventListener("keyup", (e) => {
+  const midi = engine._keyInv && engine._keyInv[e.key.toLowerCase()];
+  if (midi == null) return;
+  held.delete(midi);
+  release(midi, $(`.key[data-midi="${midi}"]`));
+});
+// Releasing the mouse button outside a key ends every mouse-held note.
+window.addEventListener("mouseup", () => {
+  for (const m of mouseHeld) release(m, $(`.key[data-midi="${m}"]`));
+  mouseHeld.clear();
+});
+
+/* ============================================================= key gains */
+
+function renderKeyGains() {
+  const notes = enabledNotes();
+  const box = $("#keyGains");
+  box.innerHTML = notes.map((m) => {
+    const v = engine.keyGains[m] == null ? 1 : engine.keyGains[m];
+    return `<div class="kg-col">
+      <input type="range" min="0" max="2" step="0.01" value="${v}" orient="vertical" data-midi="${m}"/>
+      <span class="mono small kg-val">${Math.round(v * 100)}</span>
+      <span class="small">${midiToName(m)}</span>
+    </div>`;
+  }).join("");
+  $$("input[type=range]", box).forEach((inp) => {
+    inp.addEventListener("input", () => {
+      const m = +inp.dataset.midi, v = +inp.value;
+      engine.setKeyGain(m, v);
+      inp.parentElement.querySelector(".kg-val").textContent = Math.round(v * 100);
+    });
+  });
+}
+
+/* ============================================================== recording */
+
+let recT0 = 0;
+$("#recBtn").onclick = async () => {
+  if (!engine.region) return toast("请先加载采样音色", "warn");
+  if (!recording) {
+    await engine.init();
+    pushConfig();
+    recorder = new MasterRecorder(engine);
+    recorder.start();
+    recording = true;
+    recT0 = engine.now();
+    recordEvents = [];
+    $("#recBtn").textContent = "■ 停止并保存";
+    $("#recBtn").classList.remove("btn-green");
+    $("#recBtn").classList.add("btn-danger");
+    $("#recDot").classList.remove("hidden");
+  } else {
+    recording = false;
+    $("#recDot").classList.add("hidden");
+    // Close every still-held note at the stop instant so its duration is kept.
+    const stopT = engine.now() - recT0;
+    const heldNow = [...engine.activeMidis];
+    recordEvents.push(...heldNow.map((m) => ({ midi: m, t: stopT, kind: "off" })));
+    engine.allNotesOff();
+    $$(".key.active").forEach((k) => k.classList.remove("active"));
+    held.clear(); mouseHeld.clear();
+    const { samples, sr, duration } = await recorder.stop();
+    if (duration > 600) return toast("录音过长（上限 10 分钟）", "error");
+    $("#recBtn").textContent = "● 开始录音";
+    $("#recBtn").classList.add("btn-green");
+    $("#recBtn").classList.remove("btn-danger");
+    await saveRecording(samples, sr, duration);
+  }
+};
+
+async function saveRecording(samples, sr, duration) {
+  const blob = encodeWavPcm16([samples], sr);
+  const fd = new FormData();
+  const name = `sampler-rec-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}.wav`;
+  fd.append("file", blob, name);
+  fd.append("name", name);
+  if (currentFile) fd.append("source_id", currentFile.id);
+  try {
+    const res = await fetch("/api/sampler/recordings", { method: "POST", body: fd });
+    const entry = await res.json();
+    if (!res.ok) throw new Error(entry.error || "保存失败");
+    $("#recCard").classList.remove("hidden");
+    $("#recResult").innerHTML = `
+      <span class="badge green">已存入音频库，可继续编辑</span>
+      <button class="btn-sm" onclick="playFile('${entry.id}','${esc(entry.name)}')">▶ 试听</button>
+      <button class="btn-sm" onclick="location.href='/waveform?file=${entry.id}'">波形编辑</button>
+      <a class="btn btn-sm" href="${API.downloadUrl(entry.id)}">下载</a>
+      <span class="muted">${esc(entry.name)} · ${fmtTime(entry.duration)}</span>`;
+    toast("录音已存入音频库", "success");
+    await loadFiles(entry.id);
+  } catch (e) { toast(e.message, "error"); }
+}
+
+/* Offline render from the captured note events (sample-accurate, pure-Python DSP). */
+$("#renderBtn").onclick = async () => {
+  if (!currentFile) return toast("请先加载采样音色", "warn");
+  if (!recordEvents.length) return toast("还没有录制演奏事件（点「开始录音」并演奏后再用）", "warn");
+  // Collapse on/off events into timed notes.
+  const notes = collapseEvents(recordEvents);
+  if (!notes.length) return toast("没有完整的音符", "warn");
+  const btn = $("#renderBtn"); btn.disabled = true; btn.textContent = "渲染中…";
+  try {
+    const cfg = config();
+    const body = {
+      file_id: currentFile.id,
+      config: cfg,
+      name: `sampler-render-${currentFile.name}`,
+      events: notes.map((n) => ({
+        midi: n.midi,
+        start: +n.start.toFixed(4),
+        duration: n.duration == null ? null : +n.duration.toFixed(4),
+        velocity: n.velocity,
+        gain: engine.keyGain(n.midi),
+      })),
+    };
+    const entry = await API.post("/api/sampler/render", body);
+    $("#recCard").classList.remove("hidden");
+    $("#recResult").innerHTML = `
+      <span class="badge purple">离线渲染完成（${notes.length} 个音符）</span>
+      <button class="btn-sm" onclick="playFile('${entry.id}','${esc(entry.name)}')">▶ 试听</button>
+      <button class="btn-sm" onclick="location.href='/waveform?file=${entry.id}'">波形编辑</button>
+      <a class="btn btn-sm" href="${API.downloadUrl(entry.id)}">下载</a>
+      <span class="muted">${esc(entry.name)} · ${fmtTime(entry.duration)}</span>`;
+    toast("渲染完成，已存入音频库", "success");
+    await loadFiles(entry.id);
+  } catch (e) { toast(e.message, "error"); }
+  finally { btn.disabled = false; btn.textContent = "按演奏事件离线精渲染"; }
+};
+
+function collapseEvents(evs) {
+  const sorted = [...evs].sort((a, b) => a.t - b.t || (a.kind === "on" ? -1 : 1));
+  const open = new Map(); // midi -> {start, velocity}
+  const notes = [];
+  const loop = $("#trigger").value === "loop";
+  const endT = sorted.length ? sorted[sorted.length - 1].t : 0;
+  for (const e of sorted) {
+    if (e.kind === "on") {
+      if (!open.has(e.midi)) open.set(e.midi, { start: e.t, velocity: e.velocity ?? 1 });
+    } else {
+      const st = open.get(e.midi);
+      if (st != null) {
+        notes.push({ midi: e.midi, start: st.start, velocity: st.velocity,
+                     duration: loop ? Math.max(0.02, e.t - st.start) : null });
+        open.delete(e.midi);
+      }
+    }
+  }
+  // Unreleased notes (oneshots, or still held at stop).
+  for (const [midi, st] of open) {
+    notes.push({ midi, start: st.start, velocity: st.velocity,
+                 duration: loop ? Math.max(0.05, endT - st.start) : null });
+  }
+  return notes.sort((a, b) => a.start - b.start);
+}
+
+/* ================================================================ wiring */
+
+function fillNoteSelects() {
+  const notes = Array.from({ length: 128 }, (_, m) => `<option value="${m}">${midiToName(m)} (${m})</option>`).join("");
+  $("#root").innerHTML = notes; $("#root").value = 60;
+  $("#loNote").innerHTML = notes; $("#loNote").value = 48;
+  $("#hiNote").innerHTML = notes; $("#hiNote").value = 72;
+  $("#scale").innerHTML = Object.entries(SCALES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join("");
+}
+
+$("#loadBtn").onclick = loadAsSampler;
+$("#applyRegion").onclick = applyRegion;
+$("#regionAll").onclick = () => {
+  $("#regStart").value = 0; $("#regEnd").value = +env.duration.toFixed(3);
+  $("#loopStart").value = 0; $("#loopEnd").value = +env.duration.toFixed(3);
+  applyRegion(); drawWave();
+};
+["regStart", "regEnd", "loopStart", "loopEnd"].forEach((id) =>
+  $("#" + id).addEventListener("change", () => { applyRegion(); drawWave(); }));
+["mode", "trigger"].forEach((id) => $("#" + id).addEventListener("change", pushConfig));
+$("#vel").addEventListener("input", () => { $("#velVal").textContent = (+$("#vel").value).toFixed(2); });
+$("#masterVol").addEventListener("input", () => { if (engine.master) engine.master.gain.value = +$("#masterVol").value; });
+["root", "scale", "loNote", "hiNote"].forEach((id) => $("#" + id).addEventListener("change", renderPiano));
+$("#panicBtn").onclick = () => { engine.allNotesOff(); $$(".key.active").forEach((k) => k.classList.remove("active")); held.clear(); mouseHeld.clear(); };
+
+(async () => {
+  fillNoteSelects();
+  await loadFiles(new URLSearchParams(location.search).get("file"));
+  renderPiano();
+  pushConfig();
+})();
+</script>
+{% endblock %}

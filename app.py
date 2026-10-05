@@ -22,7 +22,7 @@ from typing import Dict, Optional
 
 from flask import Flask, jsonify, render_template, request, send_file
 
-from backend import analysis, audio_io, chords, effects, mixer, realtime, separation, storage
+from backend import analysis, audio_io, chords, effects, mixer, realtime, sampler, separation, storage
 
 try:
     from flask_cors import CORS
@@ -91,6 +91,7 @@ PAGES = {
     "chords": "和弦识别",
     "separation": "音源分离",
     "effects": "效果链",
+    "sampler": "采样器",
     "mixer": "混音台",
     "export": "导出与转换",
     "history": "项目历史",
@@ -525,6 +526,82 @@ def api_effects_apply():
     effects.apply_chain_to_file(_abs_path(entry), dst, chain)
     new_entry = _register_derived(entry["id"], name, dst, {"effects": chain})
     return jsonify(new_entry)
+
+
+# --------------------------------------------------------------------------- #
+# Sampler
+# --------------------------------------------------------------------------- #
+
+@app.post("/api/sampler/render")
+def api_sampler_render():
+    """Offline-render a note-event performance into a new library entry."""
+    data = request.get_json(force=True) or {}
+    file_id = data.get("file_id")
+    entry = _entry(file_id)
+    if not entry:
+        return jsonify(error="file not found"), 404
+    config = data.get("config", {})
+    events = data.get("events", [])
+    name = data.get("name") or f"sampler-{entry['name']}"
+    try:
+        tmp = tempfile.mkstemp(suffix=".wav")
+        os.close(tmp[0])
+        dst = tmp[1]
+        sampler.render_performance(_abs_path(entry), config, events, dst)
+        new_entry = _register_derived(entry["id"], name, dst, {
+            "sampler": True,
+            "sampler_config": config,
+            "sampler_events": len(events),
+        })
+    except (ValueError, MemoryError) as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(new_entry)
+
+
+@app.post("/api/sampler/recordings")
+def api_sampler_recording():
+    """Register a live performance captured in the browser as a library file.
+
+    The browser records the sampler's master bus to PCM16 WAV; we normalise it
+    through the same conversion path as uploads and tag it so it can be edited
+    like any other library item.
+    """
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify(error="no file provided"), 400
+    source_id = request.form.get("source_id")
+    name = request.form.get("name") or f"recording-{storage.now_iso()}.wav"
+
+    fd, tmp = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    f.save(tmp)
+
+    file_id = storage.new_id()
+    dst = os.path.join(store.audio_dir, file_id + ".wav")
+    try:
+        audio_io._convert_wav(tmp, dst, None, "pcm16", None)
+    except Exception:
+        if os.path.exists(dst):
+            os.unlink(dst)
+        raise
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+    with audio_io.WavReader(dst) as r:
+        entry = {
+            "id": file_id,
+            "name": name,
+            "path": f"audio/{file_id}.wav",
+            "sr": r.sr,
+            "channels": r.channels,
+            "frames": r.nframes,
+            "duration": r.duration,
+            "size_bytes": os.path.getsize(dst),
+            "derived_from": source_id or None,
+            "sampler": True,
+        }
+        return jsonify(store.add_file(entry))
 
 
 # --------------------------------------------------------------------------- #
